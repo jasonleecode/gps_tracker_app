@@ -3,14 +3,18 @@ package com.example.gps_tracker
 
 import android.Manifest
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.location.GnssStatus
 import android.location.Location
+import android.location.LocationManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.widget.Toast
@@ -45,21 +49,25 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.height
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.TextField
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.amap.api.maps.CameraUpdateFactory
-import com.amap.api.maps.MapView
-import com.amap.api.maps.model.MyLocationStyle
 import com.example.gps_tracker.ui.theme.GPS_TrackerTheme
 import com.google.android.gms.location.FusedLocationProviderClient
 import com.google.android.gms.location.LocationCallback
 import com.google.android.gms.location.LocationRequest
 import com.google.android.gms.location.LocationResult
 import com.google.android.gms.location.LocationServices
+import com.google.android.gms.maps.CameraUpdateFactory
+import com.google.android.gms.maps.MapView
+import com.google.android.gms.maps.model.LatLng
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.File
@@ -75,6 +83,8 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private val locationViewModel: LocationViewModel by viewModels()
     private var sensorManager: SensorManager? = null
     private var stepSensor: Sensor? = null
+    private lateinit var locationManager: LocationManager
+    private lateinit var gnssStatusCallback: GnssStatus.Callback
 
     private val requestPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
@@ -82,9 +92,18 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                 permissions[Manifest.permission.ACCESS_COARSE_LOCATION] == true
             ) {
                 startLocationUpdates()
+                setupGnssStatusListener()
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && permissions[Manifest.permission.ACTIVITY_RECOGNITION] == true) {
                 setupStepCounter()
+            }
+        }
+
+    private val selectDirectoryLauncher =
+        registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+            uri?.let {
+                val path = it.path ?: it.toString()
+                locationViewModel.updateGpxPath(path)
             }
         }
 
@@ -92,6 +111,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         super.onCreate(savedInstanceState)
         fusedLocationProviderClient = LocationServices.getFusedLocationProviderClient(this)
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
+        locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
 
         setContent {
             GPS_TrackerTheme {
@@ -109,6 +129,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         super.onResume()
         if (hasLocationPermission()) {
             startLocationUpdates()
+            setupGnssStatusListener()
         } else {
             requestPermissionLauncher.launch(
                 arrayOf(
@@ -134,6 +155,24 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         stepSensor = sensorManager?.getDefaultSensor(Sensor.TYPE_STEP_COUNTER)
         stepSensor?.let {
             sensorManager?.registerListener(this, it, SensorManager.SENSOR_DELAY_UI)
+        }
+    }
+
+    private fun setupGnssStatusListener() {
+        if (ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.ACCESS_FINE_LOCATION
+            ) == PackageManager.PERMISSION_GRANTED
+        ) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                gnssStatusCallback = object : GnssStatus.Callback() {
+                    override fun onSatelliteStatusChanged(status: GnssStatus) {
+                        super.onSatelliteStatusChanged(status)
+                        locationViewModel.updateGnssStatus(status)
+                    }
+                }
+                locationManager.registerGnssStatusCallback(gnssStatusCallback, Handler(mainLooper))
+            }
         }
     }
 
@@ -186,6 +225,9 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         if (::locationCallback.isInitialized) {
             fusedLocationProviderClient.removeLocationUpdates(locationCallback)
         }
+        if (::gnssStatusCallback.isInitialized && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            locationManager.unregisterGnssStatusCallback(gnssStatusCallback)
+        }
         sensorManager?.unregisterListener(this)
     }
 
@@ -210,11 +252,57 @@ class LocationViewModel : ViewModel() {
     private var initialSteps = -1
     var elapsedTime by mutableStateOf(0L)
     var mapFailedToLoad by mutableStateOf(false)
+    var satelliteCount by mutableStateOf(0)
+    var signalQuality by mutableStateOf("N/A")
+    
+    var gpxFilePath by mutableStateOf("")
+    var saveIntervalSeconds by mutableStateOf(300)  // 默认5分钟
+    var showSettingsDialog by mutableStateOf(false)
+    
+    private var recordingStartTime: Long = 0L
+    private var lastSaveTime: Long = 0L
+    private var context: Context? = null
+    private val waypoints = mutableListOf<Location>()
 
     fun updateLocation(location: Location) {
         currentLocation = location
         if (isRecording) {
             locationHistory.add(location)
+            // 检查是否需要定期保存
+            checkAndSaveIfNeeded()
+        }
+    }
+
+    private fun checkAndSaveIfNeeded() {
+        val currentTime = System.currentTimeMillis()
+        if (currentTime - lastSaveTime >= saveIntervalSeconds * 1000 && locationHistory.isNotEmpty() && context != null) {
+            lastSaveTime = currentTime
+            viewModelScope.launch {
+                gpxFileLogger.appendGpxFile(context!!, locationHistory, gpxFilePath, recordingStartTime)
+                locationHistory.clear()
+            }
+        }
+    }
+
+    fun updateGnssStatus(status: GnssStatus) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            satelliteCount = status.satelliteCount
+            var usedInFixCount = 0
+            var totalCn0 = 0f
+            for (i in 0 until status.satelliteCount) {
+                if (status.usedInFix(i)) {
+                    usedInFixCount++
+                    totalCn0 += status.getCn0DbHz(i)
+                }
+            }
+            val avgCn0 = if (usedInFixCount > 0) totalCn0 / usedInFixCount else 0f
+            signalQuality = when {
+                avgCn0 >= 40 -> "Excellent"
+                avgCn0 >= 30 -> "Good"
+                avgCn0 >= 20 -> "Fair"
+                avgCn0 > 0 -> "Poor"
+                else -> "No Signal"
+            }
         }
     }
 
@@ -230,6 +318,9 @@ class LocationViewModel : ViewModel() {
     fun toggleRecording(context: Context) {
         isRecording = !isRecording
         if (isRecording) {
+            this.context = context
+            recordingStartTime = System.currentTimeMillis()
+            lastSaveTime = recordingStartTime
             initialSteps = -1
             steps = 0
             elapsedTime = 0
@@ -240,11 +331,39 @@ class LocationViewModel : ViewModel() {
                 }
             }
         } else {
-            if (locationHistory.isNotEmpty()){
-                gpxFileLogger.writeGpxFile(context, locationHistory)
+            // 停止记录时保存剩余的数据
+            if (locationHistory.isNotEmpty() && context != null){
+                gpxFileLogger.writeGpxFile(this.context!!, locationHistory, gpxFilePath, recordingStartTime, waypoints)
                 locationHistory.clear()
             }
+            lastSaveTime = 0L
+            this.context = null
+            clearWaypoints()
         }
+    }
+
+    fun updateSettings(newPath: String, newInterval: Int) {
+        gpxFilePath = newPath
+        saveIntervalSeconds = newInterval
+    }
+
+    fun updateGpxPath(path: String) {
+        gpxFilePath = path
+    }
+
+    fun addWaypoint(location: Location) {
+        waypoints.add(location)
+        context?.let {
+            Toast.makeText(it, "Waypoint saved", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    fun clearWaypoints() {
+        waypoints.clear()
+    }
+
+    fun getWaypoints(): List<Location> {
+        return waypoints.toList()
     }
 }
 
@@ -255,32 +374,70 @@ fun GpsTrackerScreen(locationViewModel: LocationViewModel) {
     Box(modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize()) {
             Box(modifier = Modifier.weight(4f)) {
+                MapViewContainer(locationViewModel = locationViewModel)
                 if (locationViewModel.mapFailedToLoad) {
                     MapFailurePlaceholder()
-                } else {
-                    MapViewContainer(locationViewModel = locationViewModel)
                 }
             }
-            Row(
+            Column(
                 modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceEvenly,
-                verticalAlignment = Alignment.CenterVertically
+                    .fillMaxWidth()
             ) {
-                Button(onClick = { locationViewModel.toggleRecording(context) }) {
-                    Text(text = if (locationViewModel.isRecording) "Stop Recording" else "Start Recording")
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(8.dp),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Button(onClick = { locationViewModel.toggleRecording(context) }) {
+                        Text(text = if (locationViewModel.isRecording) "Stop Recording" else "Start Recording", fontSize = 12.sp)
+                    }
+                    Button(onClick = { Toast.makeText(context, "View History Clicked", Toast.LENGTH_SHORT).show() }) {
+                        Text(text = "View History", fontSize = 12.sp)
+                    }
                 }
-                Button(onClick = { Toast.makeText(context, "View History Clicked", Toast.LENGTH_SHORT).show() }) {
-                    Text(text = "View History")
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(8.dp),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Button(onClick = { 
+                        locationViewModel.currentLocation?.let {
+                            locationViewModel.addWaypoint(it)
+                        }
+                    }) {
+                        Text(text = "Add Waypoint", fontSize = 12.sp)
+                    }
+                    Button(onClick = { locationViewModel.showSettingsDialog = true }) {
+                        Text(text = "Settings", fontSize = 12.sp)
+                    }
                 }
-                Button(onClick = { Toast.makeText(context, "About Clicked", Toast.LENGTH_SHORT).show() }) {
-                    Text(text = "About")
+            }
+            // Display GPX file path at the bottom
+            if (locationViewModel.gpxFilePath.isNotEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color.LightGray)
+                        .padding(8.dp)
+                ) {
+                    Text(
+                        text = "GPX Path: ${locationViewModel.gpxFilePath}",
+                        fontSize = 12.sp,
+                        color = Color.DarkGray,
+                        maxLines = 1
+                    )
                 }
             }
         }
-        if (locationViewModel.isRecording) {
-            FloatingStats(locationViewModel)
+        FloatingStats(locationViewModel)
+
+        // Settings Dialog
+        if (locationViewModel.showSettingsDialog) {
+            SettingsDialog(locationViewModel)
         }
     }
 }
@@ -293,9 +450,92 @@ fun MapFailurePlaceholder() {
             .background(Color.LightGray),
         contentAlignment = Alignment.Center
     ) {
-        Text("地图加载失败", fontSize = 18.sp)
+        Text("Map failed to load", fontSize = 18.sp)
     }
 }
+
+@Composable
+fun SettingsDialog(locationViewModel: LocationViewModel) {
+    var pathInput by remember { mutableStateOf(locationViewModel.gpxFilePath) }
+    var intervalInput by remember { mutableStateOf(locationViewModel.saveIntervalSeconds.toString()) }
+    val context = LocalContext.current
+
+    AlertDialog(
+        onDismissRequest = { locationViewModel.showSettingsDialog = false },
+        title = { Text("Settings") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp)
+            ) {
+                Text("GPX File Storage Path:", fontSize = 14.sp, modifier = Modifier.padding(bottom = 8.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = if (pathInput.isEmpty()) "No folder selected" else pathInput.substringAfterLast('/'),
+                        fontSize = 14.sp,
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(Color.LightGray)
+                            .padding(12.dp)
+                    )
+                    Button(onClick = {
+                        val selectDirIntent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)
+                        (context as? ComponentActivity)?.let {
+                            val launcher = it.activityResultRegistry.register(
+                                "select_directory",
+                                ActivityResultContracts.OpenDocumentTree()
+                            ) { uri ->
+                                uri?.let { selectedUri ->
+                                    val path = selectedUri.path ?: selectedUri.toString()
+                                    pathInput = path
+                                }
+                            }
+                            launcher.launch(null)
+                        }
+                    }) {
+                        Text("Browse")
+                    }
+                }
+
+                Text("Save Interval (seconds):", fontSize = 14.sp, modifier = Modifier.padding(bottom = 8.dp))
+                TextField(
+                    value = intervalInput,
+                    onValueChange = { intervalInput = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    placeholder = { Text("e.g., 300") }
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    val interval = intervalInput.toIntOrNull() ?: locationViewModel.saveIntervalSeconds
+                    val path = pathInput.ifEmpty { locationViewModel.gpxFilePath }
+                    locationViewModel.updateSettings(path, interval)
+                    locationViewModel.showSettingsDialog = false
+                }
+            ) {
+                Text("Save")
+            }
+        },
+        dismissButton = {
+            Button(
+                onClick = { locationViewModel.showSettingsDialog = false }
+            ) {
+                Text("Cancel")
+            }
+        }
+    )
+}
+
 
 
 @Composable
@@ -320,6 +560,8 @@ fun FloatingStats(locationViewModel: LocationViewModel) {
             Text("Lon: ${location?.longitude ?: 0.0}", color = Color.White, fontSize = 14.sp)
             Text("Alt: ${location?.altitude ?: 0.0}", color = Color.White, fontSize = 14.sp)
             Text("Steps: ${locationViewModel.steps}", color = Color.White, fontSize = 14.sp)
+            Text("Satellites: ${locationViewModel.satelliteCount}", color = Color.White, fontSize = 14.sp)
+            Text("Signal: ${locationViewModel.signalQuality}", color = Color.White, fontSize = 14.sp)
             Text(
                 text = "Time: %02d:%02d:%02d".format(hours, minutes, seconds),
                 color = Color.White, fontSize = 14.sp
@@ -328,27 +570,26 @@ fun FloatingStats(locationViewModel: LocationViewModel) {
     }
 }
 
-
 @Composable
 fun MapViewContainer(locationViewModel: LocationViewModel) {
     val mapView = rememberMapViewWithLifecycle()
     val currentLocation = locationViewModel.currentLocation
 
-    AndroidView({ mapView }) {
-        try {
-            val aMap = it.map
-            aMap.isMyLocationEnabled = true
-            aMap.myLocationStyle = MyLocationStyle().apply {
-                myLocationType(MyLocationStyle.LOCATION_TYPE_LOCATE)
-                interval(2000)
+    AndroidView({ mapView }) { view ->
+        view.getMapAsync { googleMap ->
+            try {
+                if (ContextCompat.checkSelfPermission(view.context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
+                    googleMap.isMyLocationEnabled = true
+                }
+                googleMap.uiSettings.isMyLocationButtonEnabled = true
+                currentLocation?.let {
+                    val latLng = LatLng(it.latitude, it.longitude)
+                    googleMap.moveCamera(CameraUpdateFactory.newLatLngZoom(latLng, 15f))
+                }
+            } catch (e: Exception) {
+                Log.e("MapViewContainer", "Error while updating map", e)
+                locationViewModel.mapFailedToLoad = true
             }
-            currentLocation?.let {
-                val latLng = com.amap.api.maps.model.LatLng(it.latitude, it.longitude)
-                aMap.moveCamera(CameraUpdateFactory.newLatLngZoom(latLng, 15f))
-            }
-        } catch (e: Throwable) {
-            Log.e("MapViewContainer", "Error while updating map", e)
-            locationViewModel.mapFailedToLoad = true
         }
     }
 }
@@ -358,7 +599,7 @@ fun rememberMapViewWithLifecycle(): MapView {
     val context = LocalContext.current
     val mapView = remember {
         MapView(context).apply {
-            onCreate(Bundle()) // Important: Call onCreate here
+            onCreate(Bundle())
         }
     }
 
@@ -367,9 +608,12 @@ fun rememberMapViewWithLifecycle(): MapView {
         val lifecycle = lifecycleOwner.lifecycle
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
+                Lifecycle.Event.ON_CREATE -> mapView.onCreate(Bundle())
                 Lifecycle.Event.ON_RESUME -> mapView.onResume()
                 Lifecycle.Event.ON_PAUSE -> mapView.onPause()
                 Lifecycle.Event.ON_DESTROY -> mapView.onDestroy()
+                Lifecycle.Event.ON_START -> mapView.onStart()
+                Lifecycle.Event.ON_STOP -> mapView.onStop()
                 else -> {}
             }
         }
@@ -382,24 +626,110 @@ fun rememberMapViewWithLifecycle(): MapView {
 }
 
 class GpxFileLogger {
-    fun writeGpxFile(context: Context, locations: List<Location>) {
+    fun writeGpxFile(context: Context, locations: List<Location>, customPath: String = "", startTimeMillis: Long = 0L, waypoints: List<Location> = emptyList()) {
         val dateFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US)
+        val fileNameDateFormat = SimpleDateFormat("yyyy-MM-dd-HHmmss", Locale.US)
+        
         val gpxContent = buildString {
-            append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
-            append("<gpx version=\"1.1\" creator=\"GPS Tracker\">\n")
-            append("<trk>\n<name>Track</name>\n<trkseg>\n")
-            locations.forEach {
-                append("<trkpt lat=\"${it.latitude}\" lon=\"${it.longitude}\">\n")
-                append("<ele>${it.altitude}</ele>\n")
-                append("<time>${dateFormat.format(Date(it.time))}</time>\n")
-                append("</trkpt>\n")
+            append("<?xml version='''1.0''' encoding='''UTF-8'''?>")
+            append("<gpx version='''1.1''' creator='''GPS Tracker'''>")
+            
+            // 添加航点
+            waypoints.forEach { waypoint ->
+                append("<wpt lat='''${waypoint.latitude}''' lon='''${waypoint.longitude}'''>")
+                append("<ele>${waypoint.altitude}</ele>")
+                append("<time>${dateFormat.format(Date(waypoint.time))}</time>")
+                append("<name>Waypoint</name>")
+                append("</wpt>")
             }
-            append("</trkseg>\n</trk>\n</gpx>")
+            
+            // 添加轨迹
+            append("<trk><name>Track</name><trkseg>")
+            locations.forEach {
+                append("<trkpt lat='''${it.latitude}''' lon='''${it.longitude}'''>")
+                append("<ele>${it.altitude}</ele>")
+                append("<time>${dateFormat.format(Date(it.time))}</time>")
+                append("</trkpt>")
+            }
+            append("</trkseg></trk></gpx>")
         }
         try {
-            val file = File(context.getExternalFilesDir(null), "track_${System.currentTimeMillis()}.gpx")
+            val fileName = if (startTimeMillis > 0L) {
+                "${fileNameDateFormat.format(Date(startTimeMillis))}.gpx"
+            } else {
+                "track_${System.currentTimeMillis()}.gpx"
+            }
+            
+            val targetDir = if (customPath.isNotEmpty()) {
+                File(customPath)
+            } else {
+                context.getExternalFilesDir(null) ?: context.filesDir
+            }
+            
+            if (!targetDir.exists()) {
+                targetDir.mkdirs()
+            }
+            
+            val file = File(targetDir, fileName)
             FileOutputStream(file).use {
                 it.write(gpxContent.toByteArray())
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    fun appendGpxFile(context: Context, locations: List<Location>, customPath: String = "", startTimeMillis: Long = 0L) {
+        val dateFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US)
+        val fileNameDateFormat = SimpleDateFormat("yyyy-MM-dd-HHmmss", Locale.US)
+        
+        // 生成轨迹点内容
+        val trackpointsContent = buildString {
+            locations.forEach {
+                append("<trkpt lat='''${it.latitude}''' lon='''${it.longitude}'''>")
+                append("<ele>${it.altitude}</ele>")
+                append("<time>${dateFormat.format(Date(it.time))}</time>")
+                append("</trkpt>")
+            }
+        }
+        
+        try {
+            val fileName = if (startTimeMillis > 0L) {
+                "${fileNameDateFormat.format(Date(startTimeMillis))}.gpx"
+            } else {
+                "track_${System.currentTimeMillis()}.gpx"
+            }
+            
+            val targetDir = if (customPath.isNotEmpty()) {
+                File(customPath)
+            } else {
+                context.getExternalFilesDir(null) ?: context.filesDir
+            }
+            
+            if (!targetDir.exists()) {
+                targetDir.mkdirs()
+            }
+            
+            val file = File(targetDir, fileName)
+            
+            // 如果文件存在，进行追加写入；否则创建新文件
+            if (file.exists()) {
+                // 读取现有文件，在</trkseg>之前插入新的轨迹点
+                val existingContent = file.readText()
+                val updatedContent = existingContent.replace("</trkseg>", "$trackpointsContent</trkseg>")
+                file.writeText(updatedContent)
+            } else {
+                // 创建新文件
+                val gpxContent = buildString {
+                    append("<?xml version='''1.0''' encoding='''UTF-8'''?>")
+                    append("<gpx version='''1.1''' creator='''GPS Tracker'''>")
+                    append("<trk><name>Track</name><trkseg>")
+                    append(trackpointsContent)
+                    append("</trkseg></trk></gpx>")
+                }
+                FileOutputStream(file).use {
+                    it.write(gpxContent.toByteArray())
+                }
             }
         } catch (e: Exception) {
             e.printStackTrace()

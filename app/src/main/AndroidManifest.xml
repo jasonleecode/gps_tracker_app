@@ -22,10 +22,8 @@
         android:theme="@style/Theme.GPS_Tracker">
 
         <meta-data
-            android:name="com.amap.api.v2.apikey"
-            android:value="e07a63998d5f06e97363371ee79d60ba" />
-
-        <service android:name="com.amap.api.location.APSService"></service>
+            android:name="com.google.android.geo.API_KEY"
+            android:value="ae0eee7c02245a036f7303b9ac1541fd7fbcfea9bf937698c909c31cf62f2708" />
 
         <activity
             android:name=".MainActivity"
