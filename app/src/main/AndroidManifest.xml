@@ -9,6 +9,7 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <application
+        android:name=".MainApplication"
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
@@ -20,7 +21,7 @@
 
         <meta-data
             android:name="com.amap.api.v2.apikey"
-            android:value="YOUR_API_KEY" />
+            android:value="e07a63998d5f06e97363371ee79d60ba" />
 
         <activity
             android:name=".MainActivity"

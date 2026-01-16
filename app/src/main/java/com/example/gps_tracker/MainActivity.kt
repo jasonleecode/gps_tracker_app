@@ -1,3 +1,4 @@
+
 package com.example.gps_tracker
 
 import android.Manifest
@@ -11,29 +12,46 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.runtime.*
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.ViewModel
-import com.amap.api.maps.AMap
 import com.amap.api.maps.CameraUpdateFactory
 import com.amap.api.maps.MapView
 import com.amap.api.maps.model.MyLocationStyle
 import com.example.gps_tracker.ui.theme.GPS_TrackerTheme
-import com.google.android.gms.location.*
+import com.google.android.gms.location.FusedLocationProviderClient
+import com.google.android.gms.location.LocationCallback
+import com.google.android.gms.location.LocationRequest
+import com.google.android.gms.location.LocationResult
+import com.google.android.gms.location.LocationServices
 import java.io.File
 import java.io.FileOutputStream
 import java.text.SimpleDateFormat
-import java.util.*
+import java.util.Date
+import java.util.Locale
 
 class MainActivity : ComponentActivity() {
 
@@ -178,7 +196,7 @@ fun GpsTrackerScreen(locationViewModel: LocationViewModel) {
 @Composable
 fun MapViewContainer(locationViewModel: LocationViewModel) {
     val context = LocalContext.current
-    val mapView = remember { MapView(context) }
+    val mapView = rememberMapViewWithLifecycle()
     val currentLocation = locationViewModel.currentLocation
 
     AndroidView({ mapView }) {
@@ -193,13 +211,35 @@ fun MapViewContainer(locationViewModel: LocationViewModel) {
             aMap.moveCamera(CameraUpdateFactory.newLatLngZoom(latLng, 15f))
         }
     }
-    DisposableEffect(Unit) {
-        onDispose {
-            mapView.onDestroy()
-        }
-    }
 }
 
+@Composable
+fun rememberMapViewWithLifecycle(): MapView {
+    val context = LocalContext.current
+    val mapView = remember {
+        MapView(context).apply {
+            onCreate(Bundle()) // Important: Call onCreate here
+        }
+    }
+
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, mapView) {
+        val lifecycle = lifecycleOwner.lifecycle
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> mapView.onResume()
+                Lifecycle.Event.ON_PAUSE -> mapView.onPause()
+                Lifecycle.Event.ON_DESTROY -> mapView.onDestroy()
+                else -> {}
+            }
+        }
+        lifecycle.addObserver(observer)
+        onDispose {
+            lifecycle.removeObserver(observer)
+        }
+    }
+    return mapView
+}
 
 class GpxFileLogger {
     fun writeGpxFile(context: Context, locations: List<Location>) {
