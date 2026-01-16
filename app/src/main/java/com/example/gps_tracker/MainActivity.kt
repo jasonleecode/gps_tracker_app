@@ -26,10 +26,15 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.height
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
@@ -45,10 +50,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
 import androidx.compose.material3.AlertDialog
@@ -119,7 +126,14 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
-                    GpsTrackerScreen(locationViewModel)
+                    when (locationViewModel.currentModule) {
+                        "menu" -> MainMenuScreen(locationViewModel)
+                        "movement" -> GpsTrackerScreen(locationViewModel)
+                        "driving" -> DrivingScreen(locationViewModel)
+                        "environment" -> EnvironmentScreen(locationViewModel)
+                        // "control" -> ControlScreen(locationViewModel)
+                        else -> MainMenuScreen(locationViewModel)
+                    }
                 }
             }
         }
@@ -259,6 +273,19 @@ class LocationViewModel : ViewModel() {
     var saveIntervalSeconds by mutableStateOf(300)  // 默认5分钟
     var showSettingsDialog by mutableStateOf(false)
     
+    // 当前显示的功能模块
+    var currentModule by mutableStateOf("menu")  // "menu", "movement", "environment", "control"
+    
+    // 环境模块 - 蓝牙传感器数据
+    var temperature by mutableStateOf(0f)
+    var humidity by mutableStateOf(0f)
+    var oxygenLevel by mutableStateOf(0f)
+    var coLevel by mutableStateOf(0f)
+    var co2Level by mutableStateOf(0f)
+    var bluetoothConnected by mutableStateOf(false)
+    var bluetoothDevices by mutableStateOf<List<String>>(emptyList())
+    var selectedDeviceName by mutableStateOf("")
+    
     private var recordingStartTime: Long = 0L
     private var lastSaveTime: Long = 0L
     private var context: Context? = null
@@ -370,70 +397,171 @@ class LocationViewModel : ViewModel() {
 @Composable
 fun GpsTrackerScreen(locationViewModel: LocationViewModel) {
     val context = LocalContext.current
+    val configuration = LocalConfiguration.current
+    val isLandscape = configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
 
     Box(modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize()) {
-            Box(modifier = Modifier.weight(4f)) {
+            Box(modifier = Modifier.weight(if (isLandscape) 1f else 4f)) {
                 MapViewContainer(locationViewModel = locationViewModel)
                 if (locationViewModel.mapFailedToLoad) {
                     MapFailurePlaceholder()
                 }
             }
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-            ) {
+            
+            if (isLandscape) {
+                // 横屏：按钮和信息在右侧
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .weight(1f)
                         .padding(8.dp),
-                    horizontalArrangement = Arrangement.SpaceEvenly,
-                    verticalAlignment = Alignment.CenterVertically
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Button(onClick = { locationViewModel.toggleRecording(context) }) {
-                        Text(text = if (locationViewModel.isRecording) "Stop Recording" else "Start Recording", fontSize = 12.sp)
-                    }
-                    Button(onClick = { Toast.makeText(context, "View History Clicked", Toast.LENGTH_SHORT).show() }) {
-                        Text(text = "View History", fontSize = 12.sp)
-                    }
-                }
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(8.dp),
-                    horizontalArrangement = Arrangement.SpaceEvenly,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Button(onClick = { 
-                        locationViewModel.currentLocation?.let {
-                            locationViewModel.addWaypoint(it)
+                    Column(
+                        modifier = Modifier
+                            .weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Button(
+                            onClick = { locationViewModel.toggleRecording(context) },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(35.dp)
+                        ) {
+                            Text(text = if (locationViewModel.isRecording) "Stop" else "Start", fontSize = 10.sp)
                         }
-                    }) {
-                        Text(text = "Add Waypoint", fontSize = 12.sp)
+                        Button(
+                            onClick = { Toast.makeText(context, "View History Clicked", Toast.LENGTH_SHORT).show() },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(35.dp)
+                        ) {
+                            Text(text = "History", fontSize = 10.sp)
+                        }
+                        Button(
+                            onClick = { 
+                                locationViewModel.currentLocation?.let {
+                                    locationViewModel.addWaypoint(it)
+                                }
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(35.dp)
+                        ) {
+                            Text(text = "Waypoint", fontSize = 10.sp)
+                        }
+                        Button(
+                            onClick = { locationViewModel.showSettingsDialog = true },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(35.dp)
+                        ) {
+                            Text(text = "Settings", fontSize = 10.sp)
+                        }
                     }
-                    Button(onClick = { locationViewModel.showSettingsDialog = true }) {
-                        Text(text = "Settings", fontSize = 12.sp)
+                    
+                    // 信息显示
+                    if (locationViewModel.gpxFilePath.isNotEmpty()) {
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .background(Color.LightGray)
+                                .padding(8.dp)
+                                .clip(RoundedCornerShape(4.dp))
+                        ) {
+                            Text(
+                                text = "GPX: ${locationViewModel.gpxFilePath.takeLast(20)}",
+                                fontSize = 10.sp,
+                                color = Color.DarkGray
+                            )
+                        }
                     }
                 }
-            }
-            // Display GPX file path at the bottom
-            if (locationViewModel.gpxFilePath.isNotEmpty()) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(Color.LightGray)
-                        .padding(8.dp)
-                ) {
-                    Text(
-                        text = "GPX Path: ${locationViewModel.gpxFilePath}",
-                        fontSize = 12.sp,
-                        color = Color.DarkGray,
-                        maxLines = 1
-                    )
+            } else {
+                // 竖屏：按钮在下方
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Button(
+                            onClick = { locationViewModel.toggleRecording(context) },
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(40.dp)
+                        ) {
+                            Text(text = if (locationViewModel.isRecording) "Stop Recording" else "Start Recording", fontSize = 10.sp)
+                        }
+                        Button(
+                            onClick = { Toast.makeText(context, "View History Clicked", Toast.LENGTH_SHORT).show() },
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(40.dp)
+                        ) {
+                            Text(text = "View History", fontSize = 10.sp)
+                        }
+                    }
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Button(
+                            onClick = { 
+                                locationViewModel.currentLocation?.let {
+                                    locationViewModel.addWaypoint(it)
+                                }
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(40.dp)
+                        ) {
+                            Text(text = "Add Waypoint", fontSize = 10.sp)
+                        }
+                        Button(
+                            onClick = { locationViewModel.showSettingsDialog = true },
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(40.dp)
+                        ) {
+                            Text(text = "Settings", fontSize = 10.sp)
+                        }
+                    }
+                    
+                    // Display GPX file path at the bottom
+                    if (locationViewModel.gpxFilePath.isNotEmpty()) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(Color.LightGray)
+                                .padding(6.dp)
+                        ) {
+                            Text(
+                                text = "GPX Path: ${locationViewModel.gpxFilePath}",
+                                fontSize = 10.sp,
+                                color = Color.DarkGray,
+                                maxLines = 1
+                            )
+                        }
+                    }
                 }
             }
         }
         FloatingStats(locationViewModel)
+
+        // 返回菜单按钮（右上方）
+        Button(
+            onClick = { locationViewModel.currentModule = "menu" },
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(8.dp)
+        ) {
+            Text("×", fontSize = 16.sp)
+        }
 
         // Settings Dialog
         if (locationViewModel.showSettingsDialog) {
@@ -734,5 +862,467 @@ class GpxFileLogger {
         } catch (e: Exception) {
             e.printStackTrace()
         }
+    }
+}
+
+@Composable
+fun MainMenuScreen(locationViewModel: LocationViewModel) {
+    val menuItems = listOf(
+        Pair("运动", "sports"),
+        Pair("环境", "environment"),
+        Pair("中控", "control"),
+        Pair("设置", "settings"),
+        Pair("驾驶", "driving"),
+        Pair("XX2", "xx2"),
+        Pair("XX3", "xx3"),
+        Pair("XX4", "xx4")
+    )
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(4.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Text("GPS Tracker", fontSize = 16.sp, modifier = Modifier.padding(bottom = 2.dp))
+            
+            // 4行2列的菜单按钮
+            for (row in 0 until 4) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    for (col in 0 until 2) {
+                        val index = row * 2 + col
+                        if (index < menuItems.size) {
+                            val (label, module) = menuItems[index]
+                            MenuButton(
+                                label = label,
+                                modifier = Modifier
+                                    .weight(1f),
+                                onClick = {
+                                    when (module) {
+                                        "sports" -> locationViewModel.currentModule = "movement"
+                                        "environment" -> locationViewModel.currentModule = "environment"
+                                        "driving" -> locationViewModel.currentModule = "driving"
+                                        "settings" -> {
+                                            locationViewModel.showSettingsDialog = true
+                                            // 保持在菜单页面，设置对话框弹出
+                                        }
+                                        else -> {
+                                            // 其他功能暂未开发
+                                        }
+                                    }
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun MenuButton(
+    label: String,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    Button(
+        onClick = onClick,
+        modifier = modifier,
+        shape = RoundedCornerShape(4.dp),
+        contentPadding = PaddingValues(2.dp)
+    ) {
+        Text(label, fontSize = 11.sp)
+    }
+}
+
+@Composable
+fun DrivingScreen(locationViewModel: LocationViewModel) {
+    val context = LocalContext.current
+    val configuration = LocalConfiguration.current
+    val isLandscape = configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
+    val speed = locationViewModel.currentLocation?.speed ?: 0f
+    var rpm by remember { mutableStateOf(0f) }
+
+    // 模拟转速随速度变化
+    rpm = (speed * 50).coerceIn(0f, 7000f)
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        Column(modifier = Modifier.fillMaxSize()) {
+
+            if (isLandscape) {
+                // 横屏：仪表盘横排
+                Row(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .padding(8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // 速度仪表
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text("速度", fontSize = 14.sp, modifier = Modifier.padding(bottom = 4.dp))
+                        Gauge(
+                            value = speed,
+                            maxValue = 200f,
+                            unit = "km/h",
+                            modifier = Modifier
+                                .size(120.dp)
+                        )
+                    }
+
+                    // 转速仪表
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text("转速", fontSize = 14.sp, modifier = Modifier.padding(bottom = 4.dp))
+                        Gauge(
+                            value = rpm,
+                            maxValue = 7000f,
+                            unit = "RPM",
+                            modifier = Modifier
+                                .size(120.dp)
+                        )
+                    }
+
+                    // 信息标签
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .background(Color.LightGray)
+                            .padding(8.dp)
+                            .clip(RoundedCornerShape(8.dp)),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text("车辆信息", fontSize = 12.sp)
+                        InfoTag("水温", "85°C")
+                        InfoTag("油量", "75%")
+                        InfoTag("电量", "90%")
+                    }
+                }
+            } else {
+                // 竖屏：仪表盘排成2列
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // 速度仪表
+                    Column(
+                        modifier = Modifier
+                            .weight(1f),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text("速度", fontSize = 14.sp, modifier = Modifier.padding(bottom = 4.dp))
+                        Gauge(
+                            value = speed,
+                            maxValue = 200f,
+                            unit = "km/h",
+                            modifier = Modifier
+                                .size(130.dp)
+                        )
+                    }
+
+                    // 转速仪表
+                    Column(
+                        modifier = Modifier
+                            .weight(1f),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text("转速", fontSize = 14.sp, modifier = Modifier.padding(bottom = 4.dp))
+                        Gauge(
+                            value = rpm,
+                            maxValue = 7000f,
+                            unit = "RPM",
+                            modifier = Modifier
+                                .size(130.dp)
+                        )
+                    }
+                }
+
+                // 信息标签区域
+                Column(
+                    modifier = Modifier
+                        .weight(0.8f)
+                        .fillMaxWidth()
+                        .background(Color.LightGray)
+                        .padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text("车辆信息", fontSize = 16.sp, modifier = Modifier.padding(bottom = 4.dp))
+                    InfoTag("水温", "85°C")
+                    InfoTag("油量", "75%")
+                    InfoTag("电量", "90%")
+                }
+            }
+        }
+
+        // 返回菜单按钮（右上方）
+        Button(
+            onClick = { locationViewModel.currentModule = "menu" },
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(8.dp)
+        ) {
+            Text("×", fontSize = 16.sp)
+        }
+    }
+}
+
+@Composable
+fun Gauge(
+    value: Float,
+    maxValue: Float,
+    unit: String,
+    modifier: Modifier = Modifier
+) {
+    Box(modifier = modifier) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val centerX = size.width / 2
+            val centerY = size.height / 2
+            val radius = size.minDimension / 2 - 20
+
+            // 绘制背景圆
+            drawCircle(
+                color = Color.White,
+                radius = radius,
+                center = androidx.compose.ui.geometry.Offset(centerX, centerY)
+            )
+
+            // 绘制边框
+            drawCircle(
+                color = Color.Black,
+                radius = radius,
+                center = androidx.compose.ui.geometry.Offset(centerX, centerY),
+                style = androidx.compose.ui.graphics.drawscope.Stroke(width = 2f)
+            )
+
+            // 绘制刻度
+            for (i in 0..10) {
+                val angle = Math.PI / 6 + (i * Math.PI * 0.8 / 10)
+                val x1 = centerX + (radius * 0.9 * kotlin.math.cos(angle)).toFloat()
+                val y1 = centerY + (radius * 0.9 * kotlin.math.sin(angle)).toFloat()
+                val x2 = centerX + (radius * kotlin.math.cos(angle)).toFloat()
+                val y2 = centerY + (radius * kotlin.math.sin(angle)).toFloat()
+
+                drawLine(
+                    color = Color.Black,
+                    start = androidx.compose.ui.geometry.Offset(x1, y1),
+                    end = androidx.compose.ui.geometry.Offset(x2, y2),
+                    strokeWidth = 2f
+                )
+            }
+
+            // 绘制指针
+            val ratio = (value / maxValue).coerceIn(0f, 1f)
+            val angle = Math.PI / 6 + (ratio * Math.PI * 0.8)
+            val pointerX = centerX + (radius * 0.7 * kotlin.math.cos(angle)).toFloat()
+            val pointerY = centerY + (radius * 0.7 * kotlin.math.sin(angle)).toFloat()
+
+            drawLine(
+                color = Color.Red,
+                start = androidx.compose.ui.geometry.Offset(centerX, centerY),
+                end = androidx.compose.ui.geometry.Offset(pointerX, pointerY),
+                strokeWidth = 3f
+            )
+
+            // 绘制中心圆
+            drawCircle(
+                color = Color.Black,
+                radius = 8f,
+                center = androidx.compose.ui.geometry.Offset(centerX, centerY)
+            )
+        }
+
+        Column(
+            modifier = Modifier
+                .align(Alignment.Center)
+                .padding(bottom = 20.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                text = String.format("%.1f", value),
+                fontSize = 20.sp,
+                modifier = Modifier.padding(bottom = 4.dp)
+            )
+            Text(text = unit, fontSize = 12.sp)
+        }
+    }
+}
+
+@Composable
+fun InfoTag(label: String, value: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(Color.White)
+            .padding(12.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(label, fontSize = 14.sp)
+        Text(value, fontSize = 14.sp, color = Color.Blue)
+    }
+}
+
+@Composable
+fun EnvironmentScreen(locationViewModel: LocationViewModel) {
+    val context = LocalContext.current
+    var isScanning by remember { mutableStateOf(false) }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text("环境监测", fontSize = 18.sp, modifier = Modifier.padding(bottom = 8.dp))
+
+            // 蓝牙连接状态
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(if (locationViewModel.bluetoothConnected) Color(0xFF4CAF50) else Color.LightGray)
+                    .padding(12.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = if (locationViewModel.bluetoothConnected) "已连接: ${locationViewModel.selectedDeviceName}" else "未连接蓝牙",
+                    fontSize = 14.sp,
+                    color = Color.White
+                )
+            }
+
+            // 扫描和连接按钮
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Button(
+                    onClick = {
+                        isScanning = true
+                        // 模拟扫描蓝牙设备
+                        locationViewModel.bluetoothDevices = listOf(
+                            "传感器-001",
+                            "传感器-002",
+                            "传感器-003"
+                        )
+                    },
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(40.dp),
+                    enabled = !isScanning
+                ) {
+                    Text("扫描设备", fontSize = 11.sp)
+                }
+                
+                Button(
+                    onClick = { isScanning = false },
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(40.dp),
+                    enabled = isScanning
+                ) {
+                    Text("停止扫描", fontSize = 11.sp)
+                }
+            }
+
+            // 设备列表
+            if (locationViewModel.bluetoothDevices.isNotEmpty()) {
+                Text("可用设备:", fontSize = 12.sp)
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color(0xFFF5F5F5))
+                        .padding(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    locationViewModel.bluetoothDevices.forEach { device ->
+                        Button(
+                            onClick = {
+                                locationViewModel.selectedDeviceName = device
+                                locationViewModel.bluetoothConnected = true
+                                // 模拟连接后接收数据
+                                locationViewModel.temperature = 22.5f
+                                locationViewModel.humidity = 65f
+                                locationViewModel.oxygenLevel = 20.9f
+                                locationViewModel.coLevel = 8.5f
+                                locationViewModel.co2Level = 410f
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(36.dp)
+                        ) {
+                            Text(device, fontSize = 11.sp)
+                        }
+                    }
+                }
+            }
+
+            // 传感器数据显示
+            if (locationViewModel.bluetoothConnected) {
+                Text("传感器数据:", fontSize = 12.sp)
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color(0xFFF5F5F5))
+                        .padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    SensorData("温度", "${String.format("%.1f", locationViewModel.temperature)}°C", Color(0xFFFF9800))
+                    SensorData("湿度", "${String.format("%.0f", locationViewModel.humidity)}%", Color(0xFF2196F3))
+                    SensorData("氧气", "${String.format("%.1f", locationViewModel.oxygenLevel)}%", Color(0xFF4CAF50))
+                    SensorData("一氧化碳", "${String.format("%.1f", locationViewModel.coLevel)} ppm", Color(0xFFF44336))
+                    SensorData("二氧化碳", "${String.format("%.0f", locationViewModel.co2Level)} ppm", Color(0xFF9C27B0))
+                }
+            }
+        }
+
+        // 返回菜单按钮（右上方）
+        Button(
+            onClick = { locationViewModel.currentModule = "menu" },
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(8.dp)
+        ) {
+            Text("×", fontSize = 16.sp)
+        }
+    }
+}
+
+@Composable
+fun SensorData(label: String, value: String, color: Color) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(6.dp))
+            .background(color.copy(alpha = 0.2f))
+            .padding(10.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(label, fontSize = 12.sp)
+        Text(value, fontSize = 12.sp, color = color)
     }
 }
