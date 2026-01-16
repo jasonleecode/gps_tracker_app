@@ -7,6 +7,7 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
 
     <application
         android:name=".MainApplication"
@@ -22,6 +23,8 @@
         <meta-data
             android:name="com.amap.api.v2.apikey"
             android:value="e07a63998d5f06e97363371ee79d60ba" />
+
+        <service android:name="com.amap.api.location.APSService"></service>
 
         <activity
             android:name=".MainActivity"
